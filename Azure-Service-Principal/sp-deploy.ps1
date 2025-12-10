@@ -5,14 +5,49 @@
 param(
     [switch]$UpdateOnly
 )
+# Track actions across rotation + role loop
+$actionLog = @()
+
+# ================================
+# Module Dependency Check (Az umbrella)
+# ================================
+function Test-AzModule {
+    param(
+        [Parameter(Mandatory)]
+        [string]$MinVersion
+    )
+
+    $installed = Get-InstalledModule -Name Az -ErrorAction SilentlyContinue
+
+    if (-not $installed) {
+        Write-Error "❌ Missing required module: Az. Install it with: Install-Module Az -Scope CurrentUser"
+        return $false
+    }
+    elseif ([Version]$installed.Version -lt [Version]$MinVersion) {
+        Write-Error "⚠️ Az module is outdated (found $($installed.Version), need $MinVersion+). Update with: Update-Module Az"
+        return $false
+    }
+    else {
+        Write-Host "✅ Az $($installed.Version) meets requirements." -ForegroundColor Green
+        return $true
+    }
+}
+
+# Example usage at script start:
+if (-not (Test-AzModule -MinVersion "14.4.0")) {
+    $actionLog += "$(Get-Date -Format 'u') - Dependency check failed"
+    exit 1
+}
+$actionLog += "$(Get-Date -Format 'u') - Dependency check passed"
+
+
 
 # Variables to track secret rotation
 $lastReset = $null
 $daysSince = $null
 $choice = $null
 
-# Track actions across rotation + role loop
-$actionLog = @()
+
 
 # Variables for Azure connection
 $subscriptionId = "bb8f3354-1ce0-4efc-b2a7-8506304c5362"
