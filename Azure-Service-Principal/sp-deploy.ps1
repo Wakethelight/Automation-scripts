@@ -33,7 +33,7 @@ function Test-AzModule {
     }
 }
 
-# Example usage at script start:
+
 if (-not (Test-AzModule -MinVersion "14.4.0")) {
     $actionLog += "$(Get-Date -Format 'u') - Dependency check failed"
     exit 1
