@@ -46,12 +46,30 @@ if ($confirm -ne "y") {
     exit
 }
 
-# Delete SP
+# ================================
+# Delete Service Principal / Enterprise App
+# ================================
+
 try {
-    Remove-AzADServicePrincipal -ObjectId $sp.Id -Force
-    Write-Host "Deleted Service Principal $SpName"
-} catch {
-    Write-Warning "Failed to delete Service Principal $SpName"
+    # First check if there is a tenant-owned application object
+    $app = Get-AzADApplication -ApplicationId $sp.AppId -ErrorAction SilentlyContinue
+
+    if ($app) {
+        # Tenant-owned app registration exists → delete the app (cascades SP)
+        Remove-AzADApplication -ObjectId $app.Id -Force
+        Write-Host "Deleted Application registration and Service Principal '$SpName'"
+        $deletionType = "Application + SP"
+    }
+    else {
+        # No app registration → this is likely an external/multi-tenant enterprise app
+        Remove-AzADServicePrincipal -ObjectId $sp.Id -Force
+        Write-Host "Deleted Enterprise Application (Service Principal) '$SpName'"
+        $deletionType = "Enterprise App only"
+    }
+}
+catch {
+    Write-Warning "Failed to delete '$SpName'. You may need to delete via Entra portal (Enterprise Applications → Properties → Delete)."
+    $deletionType = "Failed"
 }
 
 # Delete Key Vault secrets
@@ -64,8 +82,9 @@ try {
     Write-Warning "Failed to delete one or more Key Vault secrets"
 }
 
+
 # ================================
-# Logging
+# Logging (extended)
 # ================================
 $logLines = @()
 $logLines += "===== DELETION SUMMARY ====="
@@ -73,6 +92,7 @@ $logLines += "Service Principal: $SpName"
 $logLines += "AppId: $($sp.AppId)"
 $logLines += "TenantId: $tenantId"
 $logLines += "Environment: $Environment"
+$logLines += "Deletion Type: $deletionType"
 $logLines += "Deletion Time: $(Get-Date -Format 'u')"
 $logLines += "============================="
 
@@ -85,3 +105,4 @@ $logFile = ".\${SpName}-deletion-$timestamp.log"
 $logLines | Out-File -FilePath $logFile -Encoding UTF8
 
 Write-Host "Deletion summary exported to $logFile" -ForegroundColor Green
+
