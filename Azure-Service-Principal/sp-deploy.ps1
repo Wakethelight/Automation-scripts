@@ -46,6 +46,7 @@ $actionLog += "$(Get-Date -Format 'u') - Dependency check passed"
 $lastReset = $null
 $daysSince = $null
 $choice = $null
+$expiryDays = $null
 
 
 
@@ -82,82 +83,121 @@ $SpName = "$SpNameprefix-$Environment"
 # Connect
 Connect-AzAccount -Subscription $subscriptionId -Tenant $tenantId
 
+# ================================
+# Existing SP handling + rotation
+# ================================
 # Try to get existing SP
 $existingSp = Get-AzADServicePrincipal -DisplayName $SpName -ErrorAction SilentlyContinue
+
+if ($existingSp -and $existingSp.DisplayName -ne $SpName) {
+    Write-Warning "Mismatch: requested $SpName but found $($existingSp.DisplayName)."
+}
+
 
 if ($null -eq $existingSp) {
     if ($UpdateOnly) {
         Write-Error "UpdateOnly specified, but Service Principal $SpName does not exist."
         exit
     }
+    
+    $creationExpiryDays = $expiryDays
 
+    #creates new SP
     Write-Host "Service Principal $SpName does not exist. Creating..."
     $sp = New-AzADServicePrincipal -DisplayName $SpName
     $secretValue = $sp.PasswordCredentials.SecretText
 
+    # Prompt for expiry when creating new secret
+    $expiryChoice = Read-Host "Do you want to set an expiry on the client secret? (Y/N, default=N)"
+    $creationExpiryDays = $null
+    if ($expiryChoice.ToUpper() -eq "Y") {
+        $creationExpiryDays = Read-Host "Enter number of days until expiry (e.g. 90)"
+        if (-not [int]::TryParse($creationExpiryDays, [ref]0)) {
+            Write-Warning "Invalid number entered. Skipping expiry."
+            $creationExpiryDays = $null
+        }
+    }
+
     # Store credentials in Key Vault
     $clientIdSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-id" -SecretValue (ConvertTo-SecureString $sp.AppId -AsPlainText -Force)
     $tenantIdSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-tenant-id" -SecretValue (ConvertTo-SecureString $tenantId -AsPlainText -Force)
-    $clientSecret   = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -SecretValue (ConvertTo-SecureString $secretValue -AsPlainText -Force)
 
-    Write-Host "Stored credentials in Key Vault: $($config.VaultName)"
-} else {
+    if ($creationExpiryDays) {
+        $clientSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -SecretValue (ConvertTo-SecureString $secretValue -AsPlainText -Force) -Expires (Get-Date).AddDays([int]$creationExpiryDays)
+        Write-Host "Stored client secret with expiry of $creationExpiryDays days."
+    } else {
+        $clientSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -SecretValue (ConvertTo-SecureString $secretValue -AsPlainText -Force)
+        Write-Host "Stored client secret without expiry."
+    }
+
+}
+else {
+    # service principal exists
     Write-Host "Service Principal $SpName already exists."
     $sp = $existingSp
 
     # ================================
-    # Optional Secret Rotation Prompt
+    # Always check secrets rotation if SP exists
     # ================================
-    if ($UpdateOnly -and $existingSp) {
-        # Get current secret metadata from Key Vault
-        $secret = Get-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -ErrorAction SilentlyContinue
-        $lastReset = $secret.Attributes.Updated
-        $rotationDays = 90
-        $daysSince = $null
+    $secret = Get-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -ErrorAction SilentlyContinue
+    $lastReset = $secret.Attributes.Updated
+    $rotationDays = 90
+    $daysSince = $null
+    $rotationExpiryDays = $expiryDays
 
-        if ($lastReset) {
-            $daysSince = (New-TimeSpan -Start $lastReset -End (Get-Date)).Days
+    if ($lastReset) {
+        $daysSince = (New-TimeSpan -Start $lastReset -End (Get-Date)).Days
+    }
+
+    # Prompt for rotation
+    $promptMsg = "Do you want to force reset the secret"
+    if ($lastReset) {
+        $promptMsg += " (last reset: $lastReset, $daysSince days ago)"
+        if ($daysSince -ge $rotationDays) {
+            Write-Host "⚠ Secret is $daysSince days old — rotation recommended" -ForegroundColor Yellow
         }
+    }
+    $promptMsg += "? (Y/N, default=N): "
 
-        $promptMsg = "Do you want to force reset the secret"
-        if ($lastReset) {
-            $promptMsg += " (last reset: $lastReset, $daysSince days ago)"
-            if ($daysSince -ge $rotationDays) {
-                Write-Host "⚠ Secret is $daysSince days old — rotation recommended" -ForegroundColor Yellow
+    $choice = (Read-Host $promptMsg).ToUpper()
+
+    # Handle rotation choice
+    if ($choice -eq "Y") {
+        Write-Host "Force reset requested. Resetting secret..."
+        $reset = az ad sp credential reset --id $sp.AppId | ConvertFrom-Json
+        $clientSecret = $reset.password
+
+        # Prompt for expiry when rotating secret
+        $expiryChoice = Read-Host "Do you want to set an expiry on the rotated secret? (Y/N, default=N)"
+        $rotationExpiryDays = $null
+        if ($expiryChoice.ToUpper() -eq "Y") {
+            $rotationExpiryDays = Read-Host "Enter number of days until expiry (e.g. 90)"
+            if (-not [int]::TryParse($rotationExpiryDays, [ref]0)) {
+                Write-Warning "Invalid number entered. Skipping expiry."
+                $rotationExpiryDays = $null
             }
-
         }
-        $promptMsg += "? (Y/N, default=N): "
 
-        $choice = (Read-Host $promptMsg).ToUpper()
+        # Push new secret to Key Vault
+        $clientSecretSecure = ConvertTo-SecureString $clientSecret -AsPlainText -Force
 
-
-        if ($choice -eq "Y") {
-            Write-Host "Force reset requested. Resetting secret..."
-            $reset = az ad sp credential reset --id $sp.AppId | ConvertFrom-Json
-            $clientSecret = $reset.password
-
-            # 👉 Push new secret to Key Vault
-            $clientSecretSecure = ConvertTo-SecureString $clientSecret -AsPlainText -Force
-            $clientSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -SecretValue $clientSecretSecure
-
-            Write-Host "Updated Key Vault '$($config.VaultName)' secret '$($SpName)-client-secret'."
-
-            $actionLog += "$(Get-Date -Format 'u') - Rotated client secret"
-
-            # -------------------------------
-            # OPTIONAL: Set secret expiry
-            # Uncomment the following line if you want Key Vault to enforce rotation reminders
-            # $clientSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -SecretValue $clientSecretSecure -Expires (Get-Date).AddDays($rotationDays)
-            # -------------------------------
+        if ($rotationExpiryDays) {
+            $clientSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -SecretValue $clientSecretSecure -Expires (Get-Date).AddDays([int]$rotationExpiryDays)
+            Write-Host "Updated secret with expiry of $rotationExpiryDays days."
+            $actionLog += "$(Get-Date -Format 'u') - Rotated client secret with expiry $rotationExpiryDays days"
         } else {
-            Write-Host "Keeping existing secret."
-            $actionLog += "$(Get-Date -Format 'u') - Skipped secret rotation"
+            $clientSecret = Set-AzKeyVaultSecret -VaultName $config.VaultName -Name "$($SpName)-client-secret" -SecretValue $clientSecretSecure
+            Write-Host "Updated secret without expiry."
+            $actionLog += "$(Get-Date -Format 'u') - Rotated client secret without expiry"
         }
     }
 
-
+    else {
+        Write-Host "Keeping existing secret."
+        $actionLog += "$(Get-Date -Format 'u') - Skipped secret rotation"
+    }
 }
+
 
 # Show existing role assignments
 Write-Host "`n===== EXISTING ROLE ASSIGNMENTS ====="
@@ -242,6 +282,8 @@ do {
 # ================================
 $summaryLines = @()
 $summaryLines += "===== SUMMARY ====="
+$summaryLines += "Requested SP Name: $SpName"
+$summaryLines += "Resolved SP DisplayName: $($sp.DisplayName)"
 $summaryLines += "Service Principal: $SpName"
 $summaryLines += "AppId: $($sp.AppId)"
 $summaryLines += "TenantId: $tenantId"
@@ -257,6 +299,8 @@ if ($lastReset) {
         Write-Host "⚠ Secret is $daysSince days old — rotation recommended" -ForegroundColor Yellow
     }
 }
+
+# User choice on rotation
 if ($choice -eq "Y") {
     $summaryLines += " - Secret rotated during this run at $(Get-Date -Format 'u')"
     Write-Host "Secret rotated during this run" -ForegroundColor Green
@@ -267,7 +311,20 @@ if ($choice -eq "Y") {
     $summaryLines += " - No rotation prompt executed"
 }
 
+# Secret Exiration details
+$summaryLines += "Secret Expiry:"
+if ($creationExpiryDays) {
+    $summaryLines += " - Creation expiry set to $creationExpiryDays days"
+} else {
+    $summaryLines += " - Creation secret stored without expiry"
+}
+if ($rotationExpiryDays) {
+    $summaryLines += " - Rotation expiry set to $rotationExpiryDays days"
+} else {
+    $summaryLines += " - Rotation secret stored without expiry"
+}
 
+# Key Vault secret locations
 if (-not $UpdateOnly) {
     $summaryLines += "Secrets stored at:"
     $summaryLines += " - ClientId: $($clientIdSecret.Id)"
@@ -283,7 +340,7 @@ $summaryLines | ForEach-Object { Write-Host $_ }
 
 # Export to file
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$summaryFile = ".\${SpName}-summary-$timestamp.txt"
+$summaryFile = ".\${SpName}-summary-$timestamp.log"
 $summaryLines | Out-File -FilePath $summaryFile -Encoding UTF8
 
 Write-Host "Summary exported to $summaryFile" -ForegroundColor Green

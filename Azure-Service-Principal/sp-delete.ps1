@@ -50,6 +50,10 @@ if ($confirm -ne "y") {
 # Delete Service Principal / Enterprise App
 # ================================
 
+# ================================
+# Delete Service Principal / Enterprise App
+# ================================
+
 try {
     # First check if there is a tenant-owned application object
     $app = Get-AzADApplication -ApplicationId $sp.AppId -ErrorAction SilentlyContinue
@@ -57,18 +61,23 @@ try {
     if ($app) {
         # Tenant-owned app registration exists → delete the app (cascades SP)
         Remove-AzADApplication -ObjectId $app.Id -Force
-        Write-Host "Deleted Application registration and Service Principal '$SpName'"
+        Write-Host "✅ Deleted Application registration and Service Principal '$SpName'" -ForegroundColor Green
         $deletionType = "Application + SP"
     }
     else {
-        # No app registration → this is likely an external/multi-tenant enterprise app
-        Remove-AzADServicePrincipal -ObjectId $sp.Id -Force
-        Write-Host "Deleted Enterprise Application (Service Principal) '$SpName'"
-        $deletionType = "Enterprise App only"
+        try {
+            # No app registration → this is likely an external/multi-tenant enterprise app
+            Remove-AzADServicePrincipal -ObjectId $sp.Id -Force
+            Write-Host "✅ Deleted Enterprise Application (Service Principal) '$SpName'" -ForegroundColor Yellow
+            $deletionType = "Enterprise App only"
+        } catch {
+            Write-Warning "⚠ Deletion of '$SpName' requires manual action in Entra portal (Enterprise Applications → Properties → Delete)."
+            $deletionType = "Manual portal deletion required"
+        }
     }
 }
 catch {
-    Write-Warning "Failed to delete '$SpName'. You may need to delete via Entra portal (Enterprise Applications → Properties → Delete)."
+    Write-Warning "❌ Unexpected failure while attempting to delete '$SpName'."
     $deletionType = "Failed"
 }
 
@@ -88,11 +97,12 @@ try {
 # ================================
 $logLines = @()
 $logLines += "===== DELETION SUMMARY ====="
-$logLines += "Service Principal: $SpName"
+$logLines += "Requested SP Name: $SpName"
+$logLines += "Resolved SP DisplayName: $($sp.DisplayName)"
 $logLines += "AppId: $($sp.AppId)"
 $logLines += "TenantId: $tenantId"
 $logLines += "Environment: $Environment"
-$logLines += "Deletion Type: $deletionType"
+$logLines += "Deletion Outcome: $deletionType"
 $logLines += "Deletion Time: $(Get-Date -Format 'u')"
 $logLines += "============================="
 
