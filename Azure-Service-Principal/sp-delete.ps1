@@ -50,10 +50,6 @@ if ($confirm -ne "y") {
 # Delete Service Principal / Enterprise App
 # ================================
 
-# ================================
-# Delete Service Principal / Enterprise App
-# ================================
-
 try {
     # First check if there is a tenant-owned application object
     $app = Get-AzADApplication -ApplicationId $sp.AppId -ErrorAction SilentlyContinue
